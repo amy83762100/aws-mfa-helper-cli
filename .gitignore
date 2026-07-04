@@ -1,2 +1,24 @@
-build
-*.egg-info
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
