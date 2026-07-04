@@ -1,108 +1,239 @@
 # AWS MFA Helper CLI
 
-`aws-mfa-helper-cli` is a simple command-line tool that helps manage AWS MFA session tokens. It automates the process of generating a session token using MFA and stores the credentials in a separate session profile, allowing you to easily switch between your original and session profiles.
+A command-line tool for AWS accounts that require MFA. It exchanges your
+6-digit authenticator code for temporary session credentials and writes them
+to your AWS profile, in one interactive step.
 
-## Prerequisites
+[![CI](https://github.com/amy83762100/aws-mfa-helper-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/amy83762100/aws-mfa-helper-cli/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/aws-mfa-helper-cli.svg)](https://pypi.org/project/aws-mfa-helper-cli/)
+[![Python](https://img.shields.io/pypi/pyversions/aws-mfa-helper-cli.svg)](https://pypi.org/project/aws-mfa-helper-cli/)
 
-Before using this package, make sure you have the following:
+> This tool is for IAM users with virtual MFA devices. If your organization
+> uses AWS SSO / IAM Identity Center, use `aws sso login` instead.
 
-1. **AWS CLI Installed**: You need to have AWS CLI installed on your machine. You can download and install it from [here](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html). 
-   - After installing, configure it by running:
-     ```bash
-     aws configure
-     ```
-     Make sure you have your AWS access key ID and secret access key ready.
+## The problem
 
-2. **AWS Credentials**: Ensure that your `~/.aws/credentials` file is correctly set up with your AWS profiles. The default profile is used if none is specified.
+When an AWS account enforces MFA, long-lived access keys alone are not enough
+to call most APIs. You need to request temporary credentials:
 
-Here's an example of the AWS credentials file (`~/.aws/credentials`):
-
+```bash
+aws sts get-session-token \
+  --serial-number arn:aws:iam::123456789012:mfa/my-phone \
+  --token-code 123456 --profile dev
 ```
-[default]
-aws_access_key_id = YOUR_ACCESS_KEY_ID
-aws_secret_access_key = YOUR_SECRET_ACCESS_KEY
+
+Then copy the three values from the JSON response into `~/.aws/credentials`,
+and repeat when the session expires. This tool automates the whole exchange:
+
+```text
+$ aws-mfa-helper-cli
+? Select a profile
+❯ dev
+  staging
+  + Create a new profile
+? Where should the session credentials go?
+❯ dev-session
+  default
+  Type a custom name...
+? Enter MFA code  ******
+✓ Session valid until 21:14 (11h 58m left).
+  Use it with: --profile dev-session
 ```
+
+```bash
+aws s3 ls --profile dev-session
+```
+
+## Features
+
+- Interactive prompts for profile, destination, and region. No ARNs or
+  account IDs to remember: the MFA device is discovered through
+  `iam:ListMFADevices`.
+- Write credentials to a separate `<profile>-session` profile, to `default`,
+  or to any profile you name. Overwriting a profile that holds permanent keys
+  requires confirmation, and the keys are backed up to `<profile>-long-term`
+  first.
+- No AWS CLI dependency. All API calls go through boto3.
+- MFA codes are read from a hidden prompt or stdin, never from a command-line
+  argument, so they cannot end up in shell history.
+- Credential files are written with `0600` permissions.
+- Non-interactive mode for scripts and CI.
+- Supports `sts:AssumeRole` with MFA for role-based setups.
 
 ## Installation
 
-You can install this package using pip:
+```bash
+pip install aws-mfa-helper-cli    # or: pipx install aws-mfa-helper-cli
+```
+
+Requires Python 3.9 or newer. The AWS CLI is not required.
+
+The command name is long on purpose (the short name is taken on PyPI by a
+different project). A shell alias helps:
 
 ```bash
-pip install aws-mfa-helper-cli
+alias awsmfa="aws-mfa-helper-cli"   # add to ~/.zshrc or ~/.bashrc
 ```
+
+## Getting started
+
+The tool reads the same credentials file as the AWS CLI and boto3
+(`~/.aws/credentials`). Installing it does not grant it any access on its own.
+
+- If you have run `aws configure` before, no setup is needed. Run
+  `aws-mfa-helper-cli` and pick your profile.
+- If this machine has no AWS credentials yet, the tool detects that and offers
+  a guided setup. You can also start it directly:
+
+```bash
+aws-mfa-helper-cli setup    # prompts for access key, secret, and region
+```
+
+For a short built-in guide:
+
+```bash
+aws-mfa-helper-cli help
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `aws-mfa-helper-cli` | Interactive flow: pick profile, destination, enter code |
+| `aws-mfa-helper-cli mfa` | Same flow with flags for scripting (see below) |
+| `aws-mfa-helper-cli setup` | Save AWS access keys without the AWS CLI |
+| `aws-mfa-helper-cli whoami` | Show account, ARN, and user id for a profile |
+| `aws-mfa-helper-cli config` | List, add, edit, delete, import, export saved profiles |
+| `aws-mfa-helper-cli reset` | Remove one saved profile, or all tool settings |
+| `aws-mfa-helper-cli help` | Built-in getting-started guide |
 
 ## Usage
 
-### Setting Up IAM Account and Device (Optional)
+### Scripting and CI
 
-Before generating an MFA session token, you can configure your IAM account ID and MFA device for a specific profile to avoid entering them every time. You can do this by running the following command:
-
-```bash
-aws-mfa-helper-cli --config --profile your-profile-name --iam-account-id 123456789012 --device your-mfa-device
-```
-
-Example:
+Every interactive question has a flag equivalent. In `--no-input` mode the MFA
+code is read from stdin:
 
 ```bash
-aws-mfa-helper-cli --config --profile your-profile --iam-account-id 123456789012 --device iphone
+aws-mfa-helper-cli mfa --profile dev                  # prompts only for the code
+aws-mfa-helper-cli mfa --profile dev --region eu-west-1
+aws-mfa-helper-cli mfa --profile dev -o default       # write to [default]
+aws-mfa-helper-cli mfa --profile dev --in-place       # write into [dev] itself
+echo "$MFA_CODE" | aws-mfa-helper-cli mfa --profile dev --no-input
 ```
 
-This will save the IAM account ID and device name for the specified profile. The next time you use this profile, the tool will automatically use these values.
+### Overwriting a profile
 
-### Generating a New Session Token
+Some people prefer refreshing one profile in place over switching between
+`dev` and `dev-session`. Choose `default`, a custom name, or `--in-place` for
+that. Two safeguards apply:
 
-To generate an MFA session token, run the following command:
+- If the target currently holds permanent access keys, the tool asks before
+  overwriting and copies the keys to `<profile>-long-term`. Later runs read
+  the keys from the backup automatically.
+- Refreshing a profile that already holds session credentials does not ask
+  again.
+
+To keep your choice, save it per profile with `config edit`; the menu will
+preselect it on the next run.
+
+### Assuming a role
+
+Set `role_arn` on a profile (`aws-mfa-helper-cli config edit dev`). The tool
+then calls `sts:AssumeRole` with your MFA code instead of
+`sts:GetSessionToken`.
+
+### Managing saved profiles
 
 ```bash
-aws-mfa-helper-cli --profile your-profile-name --token-code 123456
+aws-mfa-helper-cli config list
+aws-mfa-helper-cli config add
+aws-mfa-helper-cli config edit dev
+aws-mfa-helper-cli config delete dev
+aws-mfa-helper-cli config export -o backup.toml
+aws-mfa-helper-cli config import backup.toml
 ```
 
-Example:
+### Resetting
 
 ```bash
-aws-mfa-helper-cli --profile your-profile --token-code 654321
+aws-mfa-helper-cli reset          # menu: pick a profile, or everything
+aws-mfa-helper-cli reset dev      # remove one saved profile
+aws-mfa-helper-cli reset --yes    # remove all tool settings, no prompt
 ```
 
-The tool will use the specified profile to generate a session token using your MFA device. The session token credentials will be stored in a new profile named `<profile-name>-session`.
+Reset only removes this tool's own settings. It never modifies the AWS
+credentials file: not your keys, and not the `*-session` profiles.
 
-### Using the Session Profile
+## Configuration
 
-Once the session token is generated, you must use the session profile for all your subsequent AWS commands during the session period. The session profile will be named `<profile-name>-session`. For example, if you generated the session token for the profile `your-profile`, you can now use the profile `your-profile-session` for your AWS commands:
+Settings live in `~/.config/aws-mfa/config.toml` (`$XDG_CONFIG_HOME` is
+honored). The file contains no secrets, only per-profile preferences:
+
+```toml
+[profiles.dev]
+mfa_serial = "arn:aws:iam::123456789012:mfa/my-phone"  # omit to auto-discover
+region     = "us-east-1"                               # omit to resolve automatically
+duration   = 43200                                     # session length in seconds
+role_arn   = "arn:aws:iam::123456789012:role/Admin"    # optional
+output_profile = "default"                             # optional destination
+```
+
+Session credentials are written to `~/.aws/credentials`. Configs from version
+0.1 are migrated automatically on first run.
+
+Region is resolved in this order: `--region` flag, saved profile setting, the
+source profile's region in `~/.aws/config`, `AWS_REGION` /
+`AWS_DEFAULT_REGION`, an interactive prompt, and finally `us-east-1`.
+
+## Security
+
+- MFA codes are never accepted as command-line arguments.
+- Credential and config files are written with `0600` permissions; `~/.aws`
+  is created with `0700`.
+- The only network traffic is to AWS STS and IAM, over TLS, through boto3.
+- Session credentials are still stored on disk in plaintext, like the AWS CLI
+  stores them. If your threat model requires keychain-backed storage, consider
+  [aws-vault](https://github.com/99designs/aws-vault).
+
+## Alternatives
+
+| Tool | Approach |
+|------|----------|
+| [aws-vault](https://github.com/99designs/aws-vault) | Stores keys in the OS keychain, injects credentials into a subshell |
+| [granted](https://github.com/common-fate/granted) | Role and SSO assumption, browser profile integration |
+| [awsume](https://github.com/trek10inc/awsume) | Exports credentials into the current shell session |
+
+Those tools cover more scenarios (SSO, keychain storage, multi-account role
+switching). This one focuses on the plain IAM-user-with-MFA case with a small
+install and an interactive flow.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `AWS denied the request` | The base profile's keys are wrong or expired. Check `~/.aws/credentials`. |
+| `The MFA code was not accepted` | Codes rotate every 30 seconds. Enter the next one. |
+| `Multiple MFA devices found` | Pick one in the prompt, or pin it with `config edit`. |
+| `No MFA device found` | Register a virtual MFA device in the IAM console, or set the serial with `config edit`. |
+| Asked for a region every run | Save one with `config edit <profile>`. |
+| Need the full traceback | Re-run with `--debug`. |
+
+## Contributing
 
 ```bash
-aws s3 ls --profile your-profile-session
+git clone https://github.com/amy83762100/aws-mfa-helper-cli
+cd aws-mfa-helper-cli
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pre-commit install
+pytest
 ```
 
-The session credentials will expire after a period (usually 12 hours), after which you will need to run the `aws-mfa-helper-cli` command again to get a new session token.
-
-### Handling the Region
-
-If your original profile has a region specified in the `~/.aws/config` file, the region will automatically be copied over to the session profile. If not, the AWS CLI will use the default region.
-
-## Example Workflow
-
-1. **Set up your IAM account ID and device for a profile** (Optional but recommended):
-   ```bash
-   aws-mfa-helper-cli --config --profile your-profile --iam-account-id 123456789012 --device iphone
-   ```
-
-2. **Generate a session token**:
-   ```bash
-   aws-mfa-helper-cli --profile your-profile --token-code 654321
-   ```
-
-   This will create a session profile named `your-profile-session`.
-
-3. **Use the session profile for AWS commands**:
-   ```bash
-   aws s3 ls --profile your-profile-session
-   ```
-
-## Notes
-
-- The `aws-mfa-helper-cli` tool will create a new session profile every time you run the command. You must use this session profile for all AWS operations while the session is active.
-- If your session credentials expire, simply run the `aws-mfa-helper-cli` command again to generate a new session token.
+Bug reports and pull requests are welcome. Please include a test with
+behavior changes. See [CONTRIBUTING.md](CONTRIBUTING.md) for the project
+layout and release process.
 
 ## License
 
-This project is licensed under the MIT License.
+MIT. See [LICENSE](LICENSE).
